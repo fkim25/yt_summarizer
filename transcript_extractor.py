@@ -1,147 +1,11 @@
-"""
-YouTube Transcript Extractor
-Extracts raw transcript text from YouTube videos.
-"""
-
+"""Extract and clean YouTube video transcripts."""
+import re
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound, VideoUnavailable
-import re
-
-
-# Add get_transcript as a static method for compatibility with expected API
-# This wrapper uses the new API (list/fetch) internally
-def _get_transcript_wrapper(video_id, languages=None):
-    """
-    Compatibility wrapper for YouTubeTranscriptApi.get_transcript()
-    Uses the new API (list/fetch) internally with better error handling.
-    
-    Args:
-        video_id: YouTube video ID
-        languages: List of language codes (default: ['en'])
-        
-    Returns:
-        List of transcript dictionaries with 'text', 'start', and 'duration' keys
-    """
-    import time
-    import random
-    
-    if languages is None:
-        languages = ['en']
-    
-    api = YouTubeTranscriptApi()
-    
-    # Try multiple times with different approaches
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            transcript_list = api.list(video_id)
-            
-            # Try to find transcript in requested languages
-            transcript = None
-            try:
-                transcript = transcript_list.find_transcript(languages)
-            except NoTranscriptFound:
-                # Try any available transcript
-                available = list(transcript_list)
-                if available:
-                    # Prefer manually created over auto-generated
-                    try:
-                        manual = [t for t in available if not t.is_generated]
-                        if manual:
-                            transcript = manual[0]
-                        else:
-                            # Use auto-generated if available
-                            auto = [t for t in available if t.is_generated]
-                            if auto:
-                                transcript = auto[0]
-                            else:
-                                transcript = available[0]
-                    except:
-                        transcript = available[0]
-                else:
-                    raise NoTranscriptFound(f"No transcripts available for video: {video_id}")
-            
-            if transcript:
-                # Fetch with retry logic for XML parsing errors
-                try:
-                    transcript_data = transcript.fetch()
-                except Exception as fetch_error:
-                    error_str = str(fetch_error).lower()
-                    if "no element found" in error_str or "xml" in error_str or "parse" in error_str:
-                        if attempt < max_retries - 1:
-                            # Wait a bit and retry
-                            time.sleep(1 + random.uniform(0, 1))
-                            continue
-                        else:
-                            # Last attempt failed, try translating to English if available
-                            try:
-                                if transcript.language_code != 'en':
-                                    transcript = transcript.translate('en')
-                                    transcript_data = transcript.fetch()
-                                else:
-                                    raise Exception("YouTube returned invalid XML response. The video may not have transcripts available.")
-                            except:
-                                raise Exception(
-                                    f"Failed to fetch transcript after {max_retries} attempts. "
-                                    f"This video may not have transcripts, or YouTube is temporarily blocking requests. "
-                                    f"Please try a different video or try again later."
-                                )
-                    else:
-                        raise
-            
-            # Convert to list of dicts for compatibility
-            result = []
-            for snippet in transcript_data:
-                result.append({
-                    'text': snippet.text,
-                    'start': snippet.start,
-                    'duration': snippet.duration
-                })
-            
-            if not result:
-                raise NoTranscriptFound(f"Transcript is empty for video: {video_id}")
-            
-            return result
-            
-        except (VideoUnavailable, TranscriptsDisabled, NoTranscriptFound) as e:
-            # Don't retry these errors
-            raise
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "no element found" in error_msg or "xml" in error_msg:
-                if attempt < max_retries - 1:
-                    time.sleep(1 + random.uniform(0, 1))
-                    continue
-                else:
-                    raise Exception(
-                        f"Failed to extract transcript. YouTube returned an invalid response.\n"
-                        f"This might be because:\n"
-                        f"1. The video doesn't have transcripts/captions enabled\n"
-                        f"2. YouTube is temporarily blocking the request\n"
-                        f"3. The video is restricted or unavailable\n\n"
-                        f"Try a different video that you know has captions enabled."
-                    )
-            raise
-    
-    raise Exception("Failed to extract transcript after multiple attempts")
-
-
-# For newer versions of youtube-transcript-api (1.2.0+), get_transcript is built-in
-# For older versions, we use our wrapper function
-if not hasattr(YouTubeTranscriptApi, 'get_transcript'):
-    YouTubeTranscriptApi.get_transcript = staticmethod(_get_transcript_wrapper)
 
 
 def extract_video_id(url):
-    """
-    Extract video ID from various YouTube URL formats.
-    
-    Args:
-        url: YouTube URL (various formats supported)
-        
-    Returns:
-        Video ID string or None if invalid
-    """
+    """Extract video ID from YouTube URL."""
     patterns = [
         r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)',
         r'youtube\.com\/watch\?.*v=([^&\n?#]+)',
@@ -154,66 +18,90 @@ def extract_video_id(url):
     return None
 
 
-def get_transcript(url, languages=['en']):
-    """
-    Get transcript from YouTube video.
-    
-    Args:
-        url: YouTube video URL
-        languages: List of language codes (default: ['en'])
-        
-    Returns:
-        Raw transcript text as string
-        
-    Raises:
-        ValueError: If URL is invalid
-        TranscriptsDisabled: If transcripts are disabled for the video
-        NoTranscriptFound: If no transcript found in specified languages
-        VideoUnavailable: If video is unavailable
-    """
+def validate_youtube_url(url):
+    """Validate if input is a YouTube URL."""
     video_id = extract_video_id(url)
-    
-    if not video_id:
-        raise ValueError(f"Invalid YouTube URL: {url}")
-    
+    return video_id is not None
+
+
+def fetch_transcript(video_id):
+    """Fetch transcript from YouTube video."""
     try:
-        # Use our wrapper which has better error handling
-        # This avoids the XML parsing issues by using the list/fetch API directly
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+        api = YouTubeTranscriptApi()
+        transcript_list = api.list(video_id)
         
-        if not transcript_list:
-            raise NoTranscriptFound(f"No transcript data retrieved for video: {url}")
+        # Try to get English transcript first
+        try:
+            transcript = transcript_list.find_transcript(['en'])
+        except NoTranscriptFound:
+            # Try any available transcript
+            available = list(transcript_list)
+            if not available:
+                return None
+            transcript = available[0]
         
-        # Combine all transcript entries into a single text
-        transcript_text = ' '.join([entry['text'] for entry in transcript_list])
+        transcript_data = transcript.fetch()
+        return transcript_data
         
-        if not transcript_text or len(transcript_text.strip()) == 0:
-            raise NoTranscriptFound(f"Transcript is empty for video: {url}")
-        
-        return transcript_text
+    except (VideoUnavailable, TranscriptsDisabled, NoTranscriptFound):
+        return None
+    except Exception:
+        return None
+
+
+def clean_transcript(transcript_data):
+    """Clean and normalize transcript text with timestamps."""
+    lines = []
     
-    except TranscriptsDisabled as e:
-        raise TranscriptsDisabled(f"Transcripts are disabled for video: {url}. {str(e)}")
-    except NoTranscriptFound as e:
-        raise NoTranscriptFound(f"No transcript found for video: {url}. {str(e)}")
-    except VideoUnavailable as e:
-        raise VideoUnavailable(f"Video is unavailable: {url}. {str(e)}")
-    except Exception as e:
-        # Provide more helpful error messages
-        error_msg = str(e)
-        error_lower = error_msg.lower()
+    for entry in transcript_data:
+        # Handle both dictionary format and FetchedTranscriptSnippet objects
+        if hasattr(entry, 'start'):
+            # It's a FetchedTranscriptSnippet object
+            start = entry.start
+            text = str(entry.text).strip() if hasattr(entry, 'text') else ''
+        else:
+            # It's a dictionary
+            start = entry.get('start', 0)
+            text = entry.get('text', '').strip()
         
-        if "no element found" in error_lower or "xml" in error_lower or "parse" in error_lower:
-            raise Exception(
-                f"Failed to extract transcript from {url}.\n\n"
-                f"Possible reasons:\n"
-                f"1. The video doesn't have transcripts/captions enabled\n"
-                f"2. YouTube is temporarily blocking requests\n"
-                f"3. The video is restricted or unavailable\n\n"
-                f"Please try:\n"
-                f"- A different video that has captions enabled\n"
-                f"- Waiting a few minutes and trying again\n"
-                f"- Checking if the video has subtitles available on YouTube"
-            )
-        raise Exception(f"Error extracting transcript: {error_msg}")
+        # Skip empty entries
+        if not text or len(text.strip()) == 0:
+            continue
+        
+        # Format timestamp [mm:ss]
+        minutes = int(start // 60)
+        seconds = int(start % 60)
+        timestamp = f"[{minutes:02d}:{seconds:02d}]"
+        
+        # Remove HTML tags
+        text = re.sub(r'<[^>]+>', '', text)
+        
+        # Remove empty brackets and musical notation symbols
+        text = re.sub(r'\[\s*\]', '', text)  # Remove empty brackets
+        text = re.sub(r'♪+', '', text)  # Remove musical note symbols
+        
+        # Keep more characters including punctuation
+        text = re.sub(r'[^\w\s\.,!?;:\-\[\]()\'"]', '', text)
+        
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        # Skip entries that are just brackets or special characters
+        if not text or len(text.strip()) == 0 or text.strip() in ['[]', '[', ']']:
+            continue
+        
+        # Only add if text has meaningful content
+        if text and len(text) > 0:
+            lines.append(f"{timestamp} {text}")
+    
+    full_text = ' '.join(lines)
+    
+    # Remove speaker-stage noise lines like "[music]" (only if clearly bracketed and standalone)
+    full_text = re.sub(r'\s+\[music\]\s+', ' ', full_text, flags=re.IGNORECASE)
+    full_text = re.sub(r'\s+\[inaudible\]\s+', ' [inaudible] ', full_text, flags=re.IGNORECASE)
+    
+    # Final whitespace normalization
+    full_text = re.sub(r'\s+', ' ', full_text).strip()
+    
+    return full_text
 
